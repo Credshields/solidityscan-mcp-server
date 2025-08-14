@@ -1,0 +1,35 @@
+{
+  "name": "solidityscan-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for SolidityScan smart contract security analysis",
+  "main": "dist/index.js",
+  "type": "module",
+  "bin": {
+    "solidityscan-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx index.ts",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.2",
+    "solidityscan": "0.2.3",
+    "zod": "^4.0.17"
+  },
+  "devDependencies": {
+    "@types/node": "^24.2.1",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "solidity",
+    "security",
+    "smart-contracts",
+    "blockchain"
+  ],
+  "author": "iamkunal9",
+  "license": "MIT"
+}
