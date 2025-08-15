@@ -12,7 +12,6 @@ import * as solidityscan from "solidityscan";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { tmpdir } from "os";
-import { platformChainData } from "./platformChain.js";
 import { GenerateReportPayload } from "solidityscan/dist/src/api.js";
 
 // Route all console output away from stdout to avoid breaking MCP JSON-RPC framing
@@ -397,7 +396,13 @@ class SolidityScanMCPServer {
   private async loadPlatformChain() {
     if (this.platformChainCache) return this.platformChainCache;
     try {
-      const data = platformChainData?.data as unknown as Record<string, { id: string; chains: ReadonlyArray<Record<string, string | null>> }>;
+      // Fetch latest platform-chain ids from SolidityScan API
+      const response = await fetch("https://api.solidityscan.com/api-get-platform-chain-ids/");
+      if (!response.ok) {
+        throw new Error(`Failed to fetch platform/chain ids. Status: ${response.status}`);
+      }
+      const json = (await response.json()) as { data: Record<string, { id: string; chains: ReadonlyArray<Record<string, string | null>> }> };
+      const data = json?.data as unknown as Record<string, { id: string; chains: ReadonlyArray<Record<string, string | null>> }>;
       if (!data || typeof data !== "object") {
         throw new Error("Invalid platformChainData: missing data object");
       }
