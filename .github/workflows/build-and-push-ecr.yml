@@ -7,7 +7,6 @@ on:
   workflow_dispatch:
 
 env:
-  AWS_REGION: us-east-1
   ECR_REPOSITORY: solidityscan-mcp-server
 
 jobs:
