@@ -1,10 +1,13 @@
 node_modules
 dist
+.git
+.gitignore
+*.md
 .env
 .env.*
-*.log
-logs
 .DS_Store
+*.log
 coverage
 .vscode
 .idea
+

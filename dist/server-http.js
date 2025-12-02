@@ -12,7 +12,8 @@ export class SolidityScanMCPHTTPServer {
         this.port = port;
         this.host = host;
     }
-    extractApiKey(req) {
+    extractApiKey(req, url) {
+        // Try Authorization header (Bearer token)
         const authHeader = req.headers.authorization;
         if (typeof authHeader === "string") {
             const match = authHeader.match(/^Bearer\s+(.+)$/i);
@@ -21,20 +22,41 @@ export class SolidityScanMCPHTTPServer {
             }
             return authHeader;
         }
+        // Try X-API-Key header
         const apiKeyHeader = req.headers["x-api-key"];
         if (typeof apiKeyHeader === "string") {
             return apiKeyHeader;
         }
+        // Try X-SolidityScan-API-Key header
         const solidityScanHeader = req.headers["x-solidityscan-api-key"];
         if (typeof solidityScanHeader === "string") {
             return solidityScanHeader;
         }
+        // Try query parameters (for MCP host URL integration)
+        if (url) {
+            const queryToken = url.searchParams.get("token") ||
+                url.searchParams.get("apiKey") ||
+                url.searchParams.get("api_key") ||
+                url.searchParams.get("solidityscan_api_key");
+            if (queryToken) {
+                return queryToken;
+            }
+        }
         return undefined;
     }
-    setCorsHeaders(res) {
-        res.setHeader("Access-Control-Allow-Origin", "*");
+    setCorsHeaders(res, req) {
+        const origin = req.headers.origin;
+        // Allow specific origins or use environment variable for allowed origins
+        const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(",") || [];
+        if (origin && (allowedOrigins.includes(origin) || allowedOrigins.length === 0)) {
+            res.setHeader("Access-Control-Allow-Origin", origin || "*");
+        }
+        else if (allowedOrigins.length === 0) {
+            res.setHeader("Access-Control-Allow-Origin", "*");
+        }
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
         res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-SolidityScan-API-Key, Mcp-Session-Id, X-MCP-Session-Id, mcp-protocol-version");
+        res.setHeader("Access-Control-Allow-Credentials", "true");
     }
     sendJson(res, status, body) {
         res.writeHead(status, { "Content-Type": "application/json" });
@@ -42,12 +64,16 @@ export class SolidityScanMCPHTTPServer {
     }
     async handleRequest(rawReq, res) {
         const req = rawReq;
-        this.setCorsHeaders(res);
+        this.setCorsHeaders(res, req);
         if (req.method === "OPTIONS") {
             res.writeHead(200).end();
             return;
         }
-        const apiKey = this.extractApiKey(req);
+        const hostHeader = req.headers.host || `${this.host}:${this.port}`;
+        const parsedUrl = new URL(req.url || "/", `http://${hostHeader}`);
+        const pathname = parsedUrl.pathname || "/";
+        // Extract API key (from headers or query params)
+        const apiKey = this.extractApiKey(req, parsedUrl);
         if (apiKey) {
             req.apiKey = apiKey;
             req.auth = {
@@ -57,18 +83,20 @@ export class SolidityScanMCPHTTPServer {
                 extra: { apiKey },
             };
         }
-        const hostHeader = req.headers.host || `${this.host}:${this.port}`;
-        const parsedUrl = new URL(req.url || "/", `http://${hostHeader}`);
-        const pathname = parsedUrl.pathname || "/";
         if (pathname === "/" || pathname === "/health") {
-            this.sendJson(res, 200, { status: "ok", service: "solidityscan-mcp-server" });
+            this.sendJson(res, 200, {
+                status: "ok",
+                service: "solidityscan-mcp-server",
+                version: "1.0.0",
+                timestamp: new Date().toISOString()
+            });
             return;
         }
         if (pathname === "/mcp" || pathname === "/sse") {
             await this.handleMcpRequest(req, res, apiKey);
             return;
         }
-        this.sendJson(res, 404, { error: "Not found" });
+        this.sendJson(res, 404, { error: "Not found", path: pathname });
     }
     async handleMcpRequest(req, res, apiKey) {
         try {
@@ -124,8 +152,13 @@ export class SolidityScanMCPHTTPServer {
             await transport.handleRequest(req, res);
         }
         catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "Unknown error";
             console.error("Error handling MCP HTTP request", error);
-            this.sendJson(res, 500, { error: "Internal server error" });
+            // Don't leak internal error details in production
+            this.sendJson(res, 500, {
+                error: "Internal server error",
+                ...(process.env.NODE_ENV === "development" && { details: errorMessage })
+            });
         }
     }
     async start() {
@@ -141,6 +174,17 @@ export class SolidityScanMCPHTTPServer {
         return this.port;
     }
     async stop() {
+        // Close all active sessions
+        for (const [sessionId, session] of this.sessions.entries()) {
+            try {
+                await session.transport.close();
+            }
+            catch (error) {
+                console.error(`Error closing session ${sessionId}:`, error);
+            }
+        }
+        this.sessions.clear();
+        // Close HTTP server
         await new Promise((resolve, reject) => {
             this.httpServer.close((err) => {
                 if (err) {
@@ -155,11 +199,29 @@ export class SolidityScanMCPHTTPServer {
 const isDirectRun = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
 if (isDirectRun) {
     const port = Number(process.env.PORT || process.env.SOLIDITYSCAN_MCP_PORT || 8080);
-    const server = new SolidityScanMCPHTTPServer(port);
+    const host = process.env.HOST || process.env.SOLIDITYSCAN_MCP_HOST || "0.0.0.0";
+    const server = new SolidityScanMCPHTTPServer(port, host);
+    // Graceful shutdown handling
+    const shutdown = async (signal) => {
+        console.error(`Received ${signal}, shutting down gracefully...`);
+        try {
+            await server.stop();
+            console.error("Server stopped successfully");
+            process.exit(0);
+        }
+        catch (error) {
+            console.error("Error during shutdown:", error);
+            process.exit(1);
+        }
+    };
+    process.on("SIGTERM", () => shutdown("SIGTERM"));
+    process.on("SIGINT", () => shutdown("SIGINT"));
     server
         .start()
-        .then(() => {
-        console.error(`SolidityScan MCP HTTP server listening on port ${port}`);
+        .then((actualPort) => {
+        console.error(`SolidityScan MCP HTTP server listening on ${host}:${actualPort}`);
+        console.error(`Health check: http://${host}:${actualPort}/health`);
+        console.error(`MCP endpoint: http://${host}:${actualPort}/mcp`);
     })
         .catch((error) => {
         console.error("Failed to start SolidityScan MCP HTTP server", error);

@@ -37,47 +37,41 @@ process.on("unhandledRejection", (reason) => {
 });
 
 const ScanContractSchema = z.object({
-  contractAddress: z.string().describe("The deployed contract address to scan"),
-  chain: z.string().describe("Chain name from platform-chain.json"),
-  platform: z.string().describe("Platform name from platform-chain.json"),
-  apiToken: z
-    .string()
-    .optional()
-    .describe("SolidityScan API token (optional if set in environment or headers)"),
+  contractAddress: z.string().min(1).describe("The deployed contract address to scan"),
+  chain: z.string().min(1).describe("Chain name from platform-chain.json"),
+  platform: z.string().min(1).describe("Platform name from platform-chain.json"),
+  apiToken: z.string().min(1).describe("SolidityScan API token"),
 });
 
 const ScanProjectSchema = z.object({
-  provider: z.string().describe("Git provider (e.g., github, gitlab)"),
-  projectUrl: z.string().describe("Full URL to the git repository"),
-  projectName: z.string().describe("Name for the project scan"),
+  provider: z.string().min(1).describe("Git provider (e.g., github, gitlab)"),
+  projectUrl: z.string().url().describe("Full URL to the git repository"),
+  projectName: z.string().min(1).describe("Name for the project scan"),
   projectBranch: z.string().default("main").describe("Branch to scan"),
   recurScans: z.boolean().default(false).describe("Enable recurring scans"),
   skipFilePaths: z.array(z.string()).default([]).describe("File paths to skip during scanning"),
-  apiToken: z.string().optional().describe("SolidityScan API token"),
+  apiToken: z.string().min(1).describe("SolidityScan API token"),
 });
 
 const ScanLocalDirectorySchema = z.object({
-  directoryPath: z.string().describe("Path to local directory containing Solidity files"),
+  directoryPath: z.string().min(1).describe("Path to local directory containing Solidity files"),
   projectName: z.string().default("LocalScan").describe("Name for the local project scan"),
-  apiToken: z.string().optional().describe("SolidityScan API token"),
+  apiToken: z.string().min(1).describe("SolidityScan API token"),
 });
 
 const ScanFileContentSchema = z.object({
-  fileContent: z.string().describe("Raw Solidity contract source code to scan"),
+  fileContent: z.string().min(1).describe("Raw Solidity contract source code to scan"),
   fileName: z.string().default("Contract.sol").describe("Name for the contract file"),
   projectName: z.string().default("InlineScan").describe("Name for the scan project"),
-  apiToken: z.string().optional().describe("SolidityScan API token"),
+  apiToken: z.string().min(1).describe("SolidityScan API token"),
 });
 
 const ScanAndGetReportPDFSchema = z.object({
-  contractAddress: z.string().describe("The deployed contract address to scan"),
-  chain: z.string().describe("Chain name from platform-chain.json"),
-  platform: z.string().describe("Platform name from platform-chain.json"),
+  contractAddress: z.string().min(1).describe("The deployed contract address to scan"),
+  chain: z.string().min(1).describe("Chain name from platform-chain.json"),
+  platform: z.string().min(1).describe("Platform name from platform-chain.json"),
   reportOptions: z.any().optional().describe("Optional report generation options expected by the SDK"),
-  apiToken: z
-    .string()
-    .optional()
-    .describe("SolidityScan API token (optional if set in environment or headers)"),
+  apiToken: z.string().min(1).describe("SolidityScan API token"),
 });
 
 type PlatformChainCache = {
@@ -159,10 +153,10 @@ export class SolidityScanMCPServer {
                 },
                 apiToken: {
                   type: "string",
-                  description: "SolidityScan API token (optional if set in headers or environment)",
+                  description: "SolidityScan API token",
                 },
               },
-              required: ["contractAddress", "chain"],
+              required: ["contractAddress", "chain", "platform"],
             },
           },
           {
@@ -194,7 +188,7 @@ export class SolidityScanMCPServer {
                   description: "SolidityScan API token",
                 },
               },
-              required: ["contractAddress", "chain"],
+              required: ["contractAddress", "chain", "platform"],
             },
           },
           {
@@ -357,15 +351,25 @@ export class SolidityScanMCPServer {
     };
     const scanResults = await solidityscan.quickScanContract(scanPayload, token, false);
     const { project_id, scan_id } = scanResults;
+    
+    if (!project_id || !scan_id) {
+      throw new Error("Scan completed but missing project_id or scan_id. Please try again.");
+    }
+    
     const reportPayload: GenerateReportPayload & { report_options?: unknown } = {
-      project_id: project_id || "",
-      scan_id: scan_id || "",
+      project_id,
+      scan_id,
       scan_type: "block",
     };
     if (reportOptions) {
       reportPayload.report_options = reportOptions;
     }
     const pdfInfo = await solidityscan.generateReport(reportPayload, token, false);
+    
+    if (!pdfInfo.project_id || !pdfInfo.report_id || !pdfInfo.scan_id) {
+      throw new Error("Report generation failed: missing required report information.");
+    }
+    
     const pdfUrl = `https://solidityscan.com/qs-report/${pdfInfo.project_id}/${pdfInfo.report_id}/${pdfInfo.scan_id}`;
     return {
       content: [
@@ -378,13 +382,12 @@ export class SolidityScanMCPServer {
   }
 
   private getApiToken(providedToken?: string): string {
-    const token = providedToken || process.env.SOLIDITYSCAN_API_KEY;
-    if (!token) {
+    if (!providedToken || providedToken.trim() === "") {
       throw new Error(
-        "No API token provided. Please set SOLIDITYSCAN_API_KEY environment variable, add the token to request arguments, or send it via headers."
+        "No API token provided. Please provide the token via request arguments (apiToken), HTTP headers (Authorization, X-API-Key), or query parameters (token, apiKey)."
       );
     }
-    return token;
+    return providedToken.trim();
   }
 
   private async scanContract(args: unknown): Promise<CallToolResult> {
@@ -443,7 +446,15 @@ export class SolidityScanMCPServer {
       return this.platformChainCache;
     }
     try {
-      const response = await fetch("https://api.solidityscan.com/api-get-platform-chain-ids/");
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+      
+      const response = await fetch("https://api.solidityscan.com/api-get-platform-chain-ids/", {
+        signal: controller.signal,
+      });
+      
+      clearTimeout(timeoutId);
+      
       if (!response.ok) {
         throw new Error(`Failed to fetch platform/chain ids. Status: ${response.status}`);
       }
@@ -476,7 +487,11 @@ export class SolidityScanMCPServer {
       this.platformChainCache = cache;
       return cache;
     } catch (err) {
-      originalConsoleError("Failed to load platformChainData", err);
+      if (err instanceof Error && err.name === "AbortError") {
+        originalConsoleError("Timeout loading platformChainData");
+      } else {
+        originalConsoleError("Failed to load platformChainData", err);
+      }
       const empty: PlatformChainCache = {
         platforms: [],
         chains: [],
@@ -490,10 +505,10 @@ export class SolidityScanMCPServer {
 
   private async resolvePlatformAndChain(platformInput: string, chainInput: string) {
     const index = await this.loadPlatformChain();
-    if (!platformInput) {
+    if (!platformInput || platformInput.trim() === "") {
       throw new Error("platform is required. Use a supported platform name or ID from get_supported_platforms_chains.");
     }
-    if (!chainInput) {
+    if (!chainInput || chainInput.trim() === "") {
       throw new Error("chain is required. Use a supported chain name or ID from get_supported_platforms_chains.");
     }
     let platformName = "";
@@ -588,9 +603,9 @@ export class SolidityScanMCPServer {
     } finally {
       try {
         await fs.unlink(tempFilePath);
-        await fs.rmdir(tempDir);
-      } catch {
-        // ignore cleanup errors
+        await fs.rm(tempDir, { recursive: true, force: true });
+      } catch (error) {
+        originalConsoleError(`Failed to cleanup temp directory ${tempDir}:`, error);
       }
     }
   }
