@@ -198,7 +198,16 @@ Scripts:
 pnpm dev     # Run with tsx (hot dev)
 pnpm build   # Compile TypeScript
 pnpm start   # Run compiled server
+pnpm dev:http        # Run Streamable HTTP server with tsx
+pnpm start:http      # Run compiled HTTP/SSE server
+pnpm test:http-client # Launch HTTP server + client smoke test
 ```
+
+### Streamable HTTP + SSE transport
+
+- `server-http.ts` hosts the MCP server over the Streamable HTTP transport, supporting both POST + SSE flows in a single endpoint.  
+- Each request may include `Authorization: Bearer <SOLIDITYSCAN API KEY>` or `X-API-Key`; the server caches the first key seen for the session and reuses it for subsequent requests/subscriptions.  
+- `pnpm test:http-client` boots the HTTP server on an ephemeral port, spins up a `StreamableHTTPClientTransport` with the provided header, and runs `listTools` as a smoke test. Set `SOLIDITYSCAN_TEST_API_KEY` (or reuse `SOLIDITYSCAN_API_KEY`) to make the test send a real key.
 
 ## How platform/chain resolution works
 

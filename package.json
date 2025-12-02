@@ -11,10 +11,13 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx index.ts",
+    "start:http": "node dist/server-http.js",
+    "dev:http": "tsx server-http.ts",
+    "test:http-client": "tsx test-client.ts",
     "prepare": "npm run build"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.17.2",
+    "@modelcontextprotocol/sdk": "^1.23.0",
     "solidityscan": "0.2.3",
     "zod": "^4.0.17"
   },
