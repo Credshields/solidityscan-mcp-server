@@ -8,13 +8,13 @@ COPY package.json pnpm-lock.yaml ./
 # Install pnpm
 RUN npm install -g pnpm
 
-# Install dependencies
-RUN pnpm install --frozen-lockfile
+# Install dependencies (skip scripts for faster, more reliable builds)
+RUN pnpm install --frozen-lockfile --ignore-scripts
 
 # Copy source files
 COPY . .
 
-# Build the project
+# Build the project explicitly
 RUN pnpm build
 
 # Production stage
@@ -28,7 +28,7 @@ RUN npm install -g pnpm
 # Copy package files
 COPY package.json pnpm-lock.yaml ./
 
-# Install production dependencies only (skip prepare script)
+# Install production dependencies only (skip scripts)
 RUN pnpm install --prod --frozen-lockfile --ignore-scripts
 
 # Copy built files from builder
