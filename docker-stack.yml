@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   solidityscan-mcp:
-    image: solidityscan-mcp-server:latest
+    image: 132830644905.dkr.ecr.us-east-2.amazonaws.com/solidityscan-mcp-server:latest
     ports:
       - target: 8080
         published: 8080
