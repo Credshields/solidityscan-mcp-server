@@ -25,13 +25,6 @@ services:
         condition: on-failure
         delay: 5s
         max_attempts: 3
-      resources:
-        limits:
-          cpus: '1'
-          memory: 512M
-        reservations:
-          cpus: '0.25'
-          memory: 256M
       placement:
         constraints:
           - node.role == worker
@@ -43,12 +36,6 @@ services:
       start_period: 10s
     networks:
       - solidityscan-network
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-        compress: "true"
 
 networks:
   solidityscan-network:
