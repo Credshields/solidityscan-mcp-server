@@ -3,10 +3,7 @@ name: Build and Push to ECR
 on:
   push:
     branches:
-      - main
-      - master
-    tags:
-      - 'v*'
+      - at_dockerised
   workflow_dispatch:
 
 env:
@@ -49,7 +46,7 @@ jobs:
           
           TAGS="${REGISTRY}/${REPO}:${SHA}"
           
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+          if [[ "${{ github.ref }}" == "refs/heads/at_dockerised" ]] || [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
             TAGS="${TAGS},${REGISTRY}/${REPO}:latest"
           fi
           
