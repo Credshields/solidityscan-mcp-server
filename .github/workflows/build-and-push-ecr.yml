@@ -4,6 +4,15 @@ on:
   push:
     branches:
       - at_dockerised
+    # Skip build if ONLY these files changed (deployment/config files that don't affect the image)
+    paths-ignore:
+      - 'docker-stack.yml'
+      - 'README.md'
+      - '.gitignore'
+      - 'deploy-swarm.sh'
+      - 'ecosystem.config.js'
+      - '.github/workflows/**'
+      - 'LICENSE.md'
   workflow_dispatch:
 
 env:
