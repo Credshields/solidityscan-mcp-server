@@ -3,11 +3,13 @@ export declare class SolidityScanMCPHTTPServer {
     private host;
     private sessions;
     private httpServer;
+    private wss;
     constructor(port: number, host?: string);
     private extractApiKey;
     private setCorsHeaders;
     private sendJson;
     private handleRequest;
+    private handleWebSocketConnection;
     private handleMcpRequest;
     start(): Promise<number>;
     stop(): Promise<void>;

@@ -1,16 +1,91 @@
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { WebSocketServer, WebSocket } from "ws";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { SolidityScanMCPServer } from "./server-core.js";
+/**
+ * WebSocket transport implementation for MCP protocol
+ */
+class WebSocketTransport {
+    ws;
+    sessionId;
+    onclose;
+    onerror;
+    onmessage;
+    setProtocolVersion;
+    constructor(ws, sessionId) {
+        this.ws = ws;
+        this.sessionId = sessionId;
+        this.ws.on("message", (data) => {
+            try {
+                const message = JSON.parse(data.toString());
+                if (this.onmessage) {
+                    this.onmessage(message, {
+                        requestInfo: {
+                            headers: {},
+                            url: "",
+                        },
+                        authInfo: ws.authInfo,
+                    });
+                }
+            }
+            catch (error) {
+                const err = error instanceof Error ? error : new Error(String(error));
+                if (this.onerror) {
+                    this.onerror(err);
+                }
+            }
+        });
+        this.ws.on("close", () => {
+            if (this.onclose) {
+                this.onclose();
+            }
+        });
+        this.ws.on("error", (error) => {
+            if (this.onerror) {
+                this.onerror(error);
+            }
+        });
+    }
+    async start() {
+        // WebSocket is already connected, nothing to do
+    }
+    async send(message) {
+        if (this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify(message));
+        }
+        else {
+            throw new Error("WebSocket is not open");
+        }
+    }
+    async close() {
+        if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+            this.ws.close();
+        }
+        if (this.onclose) {
+            this.onclose();
+        }
+    }
+}
 export class SolidityScanMCPHTTPServer {
     port;
     host;
     sessions = new Map();
     httpServer = createServer(this.handleRequest.bind(this));
+    wss;
     constructor(port, host = "0.0.0.0") {
         this.port = port;
         this.host = host;
+        // Create WebSocket server on the same HTTP server
+        this.wss = new WebSocketServer({
+            server: this.httpServer,
+            path: "/ws",
+            verifyClient: () => true, // Allow all connections, we'll extract API key from query params or headers
+        });
+        this.wss.on("connection", (ws, req) => {
+            this.handleWebSocketConnection(ws, req);
+        });
     }
     extractApiKey(req, url) {
         // Try Authorization header (Bearer token)
@@ -98,6 +173,67 @@ export class SolidityScanMCPHTTPServer {
         }
         this.sendJson(res, 404, { error: "Not found", path: pathname });
     }
+    async handleWebSocketConnection(ws, req) {
+        try {
+            const hostHeader = req.headers.host || `${this.host}:${this.port}`;
+            const parsedUrl = new URL(req.url || "/", `ws://${hostHeader}`);
+            // Extract API key
+            const apiKey = this.extractApiKey(req, parsedUrl);
+            const sessionId = randomUUID();
+            // Store auth info on the WebSocket for later use
+            ws.authInfo = apiKey ? {
+                token: apiKey,
+                clientId: "websocket-client",
+                scopes: [],
+                extra: { apiKey },
+            } : undefined;
+            if (apiKey) {
+                req.apiKey = apiKey;
+                req.auth = ws.authInfo;
+            }
+            // Create new MCP server instance for this connection
+            const newServer = new SolidityScanMCPServer();
+            const resolverContext = { apiKey };
+            newServer.setApiKeyResolver((context) => {
+                if (resolverContext.apiKey) {
+                    return resolverContext.apiKey;
+                }
+                const extraKey = context?.authInfo?.extra?.apiKey;
+                if (typeof extraKey === "string") {
+                    return extraKey;
+                }
+                const token = context?.authInfo?.token;
+                if (typeof token === "string") {
+                    return token;
+                }
+                return undefined;
+            });
+            // Create WebSocket transport
+            const transport = new WebSocketTransport(ws, sessionId);
+            // Connect MCP server to transport
+            await newServer.getServer().connect(transport);
+            // Store session
+            this.sessions.set(sessionId, {
+                transport,
+                server: newServer,
+                resolverContext,
+            });
+            // Handle session close
+            transport.onclose = () => {
+                this.sessions.delete(sessionId);
+            };
+            // Handle errors
+            transport.onerror = (error) => {
+                console.error(`WebSocket session ${sessionId} error:`, error);
+            };
+        }
+        catch (error) {
+            console.error("Error handling WebSocket connection:", error);
+            if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+                ws.close(1011, "Internal server error");
+            }
+        }
+    }
     async handleMcpRequest(req, res, apiKey) {
         try {
             const headerValue = req.headers["mcp-session-id"] ?? req.headers["x-mcp-session-id"];
@@ -107,7 +243,17 @@ export class SolidityScanMCPHTTPServer {
                 if (apiKey) {
                     session.resolverContext.apiKey = apiKey;
                 }
-                await session.transport.handleRequest(req, res);
+                // Only HTTP/SSE transport has handleRequest method
+                if (session.transport instanceof StreamableHTTPServerTransport) {
+                    await session.transport.handleRequest(req, res);
+                }
+                else {
+                    this.sendJson(res, 400, {
+                        jsonrpc: "2.0",
+                        error: { code: -32000, message: "Session is using WebSocket transport" },
+                        id: null,
+                    });
+                }
                 return;
             }
             if (sessionId) {
@@ -184,6 +330,12 @@ export class SolidityScanMCPHTTPServer {
             }
         }
         this.sessions.clear();
+        // Close WebSocket server
+        await new Promise((resolve) => {
+            this.wss.close(() => {
+                resolve();
+            });
+        });
         // Close HTTP server
         await new Promise((resolve, reject) => {
             this.httpServer.close((err) => {
@@ -221,7 +373,9 @@ if (isDirectRun) {
         .then((actualPort) => {
         console.error(`SolidityScan MCP HTTP server listening on ${host}:${actualPort}`);
         console.error(`Health check: http://${host}:${actualPort}/health`);
-        console.error(`MCP endpoint: http://${host}:${actualPort}/mcp`);
+        console.error(`MCP HTTP/SSE endpoint: http://${host}:${actualPort}/mcp`);
+        console.error(`MCP WebSocket endpoint: ws://${host}:${actualPort}/ws`);
+        console.error(`MCP WebSocket secure endpoint: wss://${host}:${actualPort}/ws`);
     })
         .catch((error) => {
         console.error("Failed to start SolidityScan MCP HTTP server", error);

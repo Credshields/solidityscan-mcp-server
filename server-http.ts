@@ -84,6 +84,45 @@ export class SolidityScanMCPHTTPServer {
     res.end(JSON.stringify(body));
   }
 
+  private startSseKeepAlive(res: ServerResponse) {
+    const intervalMs = Number(process.env.SSE_KEEPALIVE_INTERVAL_MS ?? 15000);
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+      return;
+    }
+
+    const writeHeartbeat = () => {
+      if (res.writableEnded) {
+        cleanup();
+        return;
+      }
+      try {
+        res.write(`: keepalive ${new Date().toISOString()}\n\n`);
+      } catch (error) {
+        console.error("Failed to send SSE keepalive event:", error);
+        cleanup();
+      }
+    };
+
+    const interval = setInterval(writeHeartbeat, intervalMs);
+    interval.unref?.();
+
+    const cleanup = () => {
+      clearInterval(interval);
+      res.off("close", cleanup);
+      res.off("finish", cleanup);
+      res.off("error", cleanup);
+    };
+
+    res.on("close", cleanup);
+    res.on("finish", cleanup);
+    res.on("error", cleanup);
+
+    // Send an immediate heartbeat so proxies see traffic right away.
+    writeHeartbeat();
+
+    return cleanup;
+  }
+
   private async handleRequest(rawReq: IncomingMessage, res: ServerResponse) {
     const req = rawReq as AugmentedRequest;
     this.setCorsHeaders(res, req);
@@ -128,6 +167,9 @@ export class SolidityScanMCPHTTPServer {
   }
 
   private async handleMcpRequest(req: AugmentedRequest, res: ServerResponse, apiKey?: string) {
+    const isSseRequest = req.method === "GET";
+    const stopKeepAlive = isSseRequest ? this.startSseKeepAlive(res) : undefined;
+
     try {
       const headerValue = req.headers["mcp-session-id"] ?? req.headers["x-mcp-session-id"];
       const sessionId = Array.isArray(headerValue) ? headerValue[0] : headerValue;
@@ -191,6 +233,8 @@ export class SolidityScanMCPHTTPServer {
         error: "Internal server error",
         ...(process.env.NODE_ENV === "development" && { details: errorMessage })
       });
+    } finally {
+      stopKeepAlive?.();
     }
   }
 
