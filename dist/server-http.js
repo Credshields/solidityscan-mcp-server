@@ -212,14 +212,6 @@ export class SolidityScanMCPHTTPServer {
                 }
                 return;
             }
-            if (sessionId) {
-                this.sendJson(res, 400, {
-                    jsonrpc: "2.0",
-                    error: { code: -32000, message: "Unknown MCP session" },
-                    id: null,
-                });
-                return;
-            }
             const newServer = new SolidityScanMCPServer();
             const resolverContext = { apiKey };
             newServer.setApiKeyResolver((context) => {
