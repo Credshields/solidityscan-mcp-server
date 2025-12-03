@@ -13,7 +13,7 @@ services:
       - HOST=0.0.0.0
       - NODE_ENV=production
     deploy:
-      replicas: 2
+      replicas: 1
       update_config:
         parallelism: 1
         delay: 10s
