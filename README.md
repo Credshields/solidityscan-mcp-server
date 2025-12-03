@@ -75,11 +75,21 @@ API keys must be provided per-request via headers, query parameters, or tool arg
 | `scan_project` | Scan a Git repository project | `provider`, `projectUrl`, `projectName` |
 | `scan_local_directory` | Scan a local directory of Solidity files | `directoryPath` |
 | `scan_file_content` | Scan raw Solidity source content | `fileContent` |
+| `get_job_status` | Check the status or retrieve the result of a queued job | `jobId` |
 
 Notes:
 
 - Use `get_supported_platforms_chains` to discover valid `platform` names and their `chain` names/IDs.
 - Although some client UIs may not mark `platform` as required, this server requires it for chain resolution.
+- All long-running scans respond immediately with a `jobId`. Poll `get_job_status` to obtain progress updates or the final result.
+
+### Asynchronous job flow
+
+1. **Submit a scan tool** (`scan_contract`, `scan_project`, `scan_local_directory`, etc.). The server validates input, queues the work off-thread, and returns a `jobId` plus basic context.
+2. **Poll `get_job_status`.** While the job is queued or running you’ll get a status message and timestamps, keeping each HTTP call short enough for Cloudflare.
+3. **Retrieve the final output.** Once the job is `succeeded` or `failed`, `get_job_status` returns the original tool response (including any error details). Jobs remain available for roughly one hour.
+
+This pattern keeps HTTP/SSE requests well under Cloudflare’s ~100 s proxy timeout, even when SolidityScan itself needs several minutes to finish.
 
 ## Examples
 
