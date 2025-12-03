@@ -1,14 +1,21 @@
 export declare class SolidityScanMCPHTTPServer {
     private port;
     private host;
-    private sessions;
-    private httpServer;
+    private readonly app;
+    private httpServer?;
+    private readonly sessions;
     constructor(port: number, host?: string);
-    private extractApiKey;
-    private setCorsHeaders;
-    private sendJson;
-    private handleRequest;
-    private handleMcpRequest;
+    private configureMiddleware;
+    private registerRoutes;
+    private handlePost;
+    private handleGet;
+    private handleDelete;
+    private sendHealth;
+    private attachAuth;
+    private sendJsonRpcError;
+    private handleRouteError;
+    private teardownSession;
+    private closeAllSessions;
     start(): Promise<number>;
     stop(): Promise<void>;
 }

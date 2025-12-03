@@ -18,10 +18,14 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.23.0",
+    "cors": "^2.8.5",
+    "express": "^5.2.1",
     "solidityscan": "0.2.3",
     "zod": "^4.0.17"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/node": "^24.2.1",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"

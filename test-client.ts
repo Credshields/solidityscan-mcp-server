@@ -8,9 +8,10 @@ async function main() {
     process.env.SOLIDITYSCAN_API_KEY ||
     "test-api-key";
 
-  const server = new SolidityScanMCPHTTPServer(0);
-  const port = await server.start();
-  const baseUrl = new URL(`http://127.0.0.1:${port}/mcp`);
+  // const server = new SolidityScanMCPHTTPServer(0);
+  // const port = await server.start();
+  // const baseUrl = new URL(`http://127.0.0.1:${port}/mcp`);
+  const baseUrl = new URL('https://mcp.solidityscan.com/mcp')
 
   const transport = new StreamableHTTPClientTransport(baseUrl, {
     requestInit: {
@@ -30,14 +31,14 @@ async function main() {
     const result = await client.listTools();
     console.log(
       JSON.stringify({
-        port,
+        // port,
         toolCount: result.tools.length,
         tools: result.tools.map((tool) => tool.name),
       })
     );
   } finally {
     await client.close().catch(() => {});
-    await server.stop().catch(() => {});
+    // await server.stop().catch(() => {});
   }
 }
 

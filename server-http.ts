@@ -1,166 +1,265 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import cors, { type CorsOptions } from "cors";
+import express, { type Request, type Response } from "express";
 import { randomUUID } from "node:crypto";
+import type { Server as HttpServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { pathToFileURL } from "node:url";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
-import { SolidityScanMCPServer } from "./server-core.js";
+import { InMemoryEventStore } from "@modelcontextprotocol/sdk/examples/shared/inMemoryEventStore.js";
+import { createServer, type ResolverContext } from "./everything.js";
 
-type AugmentedRequest = IncomingMessage & {
+type AugmentedRequest = Request & {
   auth?: AuthInfo;
   apiKey?: string;
 };
 
 type SessionRecord = {
   transport: StreamableHTTPServerTransport;
-  server: SolidityScanMCPServer;
-  resolverContext: {
-    apiKey?: string;
-  };
+  cleanup: () => Promise<void>;
+  resolverContext: ResolverContext;
+};
+
+const corsOptions: CorsOptions = {
+  origin: "*",
+  methods: ["GET", "POST", "DELETE", "OPTIONS"],
+  preflightContinue: false,
+  optionsSuccessStatus: 204,
+  exposedHeaders: ["mcp-session-id", "last-event-id", "mcp-protocol-version"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-API-Key",
+    "X-SolidityScan-API-Key",
+    "Mcp-Session-Id",
+    "X-MCP-Session-Id",
+    "mcp-protocol-version",
+    "Last-Event-ID",
+  ],
 };
 
 export class SolidityScanMCPHTTPServer {
-  private sessions = new Map<string, SessionRecord>();
-  private httpServer = createServer(this.handleRequest.bind(this));
+  private readonly app = express();
+  private httpServer?: HttpServer;
+  private readonly sessions = new Map<string, SessionRecord>();
 
-  constructor(private port: number, private host = "0.0.0.0") {}
-
-  private extractApiKey(req: IncomingMessage) {
-    const authHeader = req.headers.authorization;
-    if (typeof authHeader === "string") {
-      const match = authHeader.match(/^Bearer\s+(.+)$/i);
-      if (match) {
-        return match[1];
-      }
-      return authHeader;
-    }
-    const apiKeyHeader = req.headers["x-api-key"];
-    if (typeof apiKeyHeader === "string") {
-      return apiKeyHeader;
-    }
-    const solidityScanHeader = req.headers["x-solidityscan-api-key"];
-    if (typeof solidityScanHeader === "string") {
-      return solidityScanHeader;
-    }
-    return undefined;
+  constructor(private port: number, private host = "0.0.0.0") {
+    this.configureMiddleware();
+    this.registerRoutes();
   }
 
-  private setCorsHeaders(res: ServerResponse) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    res.setHeader(
-      "Access-Control-Allow-Headers",
-      "Content-Type, Authorization, X-API-Key, X-SolidityScan-API-Key, Mcp-Session-Id, X-MCP-Session-Id, mcp-protocol-version"
-    );
+  private configureMiddleware() {
+    this.app.disable("x-powered-by");
+    this.app.use(cors(corsOptions));
   }
 
-  private sendJson(res: ServerResponse, status: number, body: Record<string, unknown>) {
-    res.writeHead(status, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(body));
+  private registerRoutes() {
+    this.app.get("/", (_req, res) => {
+      this.sendHealth(res);
+    });
+    this.app.get("/health", (_req, res) => {
+      this.sendHealth(res);
+    });
+
+    this.app.post("/mcp", (req, res) => {
+      void this.handlePost(req, res);
+    });
+    this.app.get("/mcp", (req, res) => {
+      void this.handleGet(req, res);
+    });
+    this.app.delete("/mcp", (req, res) => {
+      void this.handleDelete(req, res);
+    });
+
+    this.app.use((_req, res) => {
+      res.status(404).json({ error: "Not found" });
+    });
   }
 
-  private async handleRequest(rawReq: IncomingMessage, res: ServerResponse) {
-    const req = rawReq as AugmentedRequest;
-    this.setCorsHeaders(res);
-    if (req.method === "OPTIONS") {
-      res.writeHead(200).end();
-      return;
-    }
-
-    const apiKey = this.extractApiKey(req);
-    if (apiKey) {
-      req.apiKey = apiKey;
-      req.auth = {
-        token: apiKey,
-        clientId: "http-client",
-        scopes: [],
-        extra: { apiKey },
-      };
-    }
-
-    const hostHeader = req.headers.host || `${this.host}:${this.port}`;
-    const parsedUrl = new URL(req.url || "/", `http://${hostHeader}`);
-    const pathname = parsedUrl.pathname || "/";
-
-    if (pathname === "/" || pathname === "/health") {
-      this.sendJson(res, 200, { status: "ok", service: "solidityscan-mcp-server" });
-      return;
-    }
-
-    if (pathname === "/mcp" || pathname === "/sse") {
-      await this.handleMcpRequest(req, res, apiKey);
-      return;
-    }
-
-    this.sendJson(res, 404, { error: "Not found" });
-  }
-
-  private async handleMcpRequest(req: AugmentedRequest, res: ServerResponse, apiKey?: string) {
+  private async handlePost(req: Request, res: Response) {
+    console.error("Received MCP POST request");
     try {
-      const headerValue = req.headers["mcp-session-id"] ?? req.headers["x-mcp-session-id"];
-      const sessionId = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+      const sessionId = getSessionIdFromRequest(req);
+      const headerApiKey = extractApiKey(req);
+      const augmentedReq = req as AugmentedRequest;
+
       if (sessionId && this.sessions.has(sessionId)) {
         const session = this.sessions.get(sessionId)!;
-        if (apiKey) {
-          session.resolverContext.apiKey = apiKey;
+        const effectiveKey = headerApiKey ?? session.resolverContext.apiKey;
+        if (effectiveKey) {
+          this.attachAuth(augmentedReq, effectiveKey);
+          session.resolverContext.apiKey = effectiveKey;
         }
-        await session.transport.handleRequest(req, res);
+        await session.transport.handleRequest(augmentedReq, res);
         return;
       }
 
       if (sessionId) {
-        this.sendJson(res, 400, {
-          jsonrpc: "2.0",
-          error: { code: -32000, message: "Unknown MCP session" },
-          id: null,
-        });
+        this.sendJsonRpcError(res, 400, -32000, "Bad Request: No valid session ID provided", req?.body?.id);
         return;
       }
 
-      const newServer = new SolidityScanMCPServer();
-      const resolverContext: SessionRecord["resolverContext"] = { apiKey };
-      newServer.setApiKeyResolver((context) => {
-        if (resolverContext.apiKey) {
-          return resolverContext.apiKey;
-        }
-        const extraKey = context?.authInfo?.extra?.apiKey;
-        if (typeof extraKey === "string") {
-          return extraKey;
-        }
-        const token = context?.authInfo?.token;
-        if (typeof token === "string") {
-          return token;
-        }
-        return undefined;
-      });
+      const bundle = createServer();
+      if (headerApiKey) {
+        bundle.resolverContext.apiKey = headerApiKey;
+        this.attachAuth(augmentedReq, headerApiKey);
+      }
 
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         enableJsonResponse: true,
+        eventStore: new InMemoryEventStore(),
         onsessioninitialized: (id) => {
+          console.error(`Session initialized with ID: ${id}`);
           this.sessions.set(id, {
             transport,
-            server: newServer,
-            resolverContext,
+            cleanup: bundle.cleanup,
+            resolverContext: bundle.resolverContext,
           });
         },
-        onsessionclosed: (id) => {
-          this.sessions.delete(id);
+        onsessionclosed: async (id) => {
+          await this.teardownSession(id);
         },
       });
 
-      await newServer.getServer().connect(transport);
-      await transport.handleRequest(req, res);
+      try {
+        await bundle.server.connect(transport);
+        await transport.handleRequest(augmentedReq, res);
+        bundle.startNotificationIntervals(transport.sessionId);
+      } catch (error) {
+        await transport.close().catch(() => {});
+        await bundle.cleanup().catch(() => {});
+        throw error;
+      }
     } catch (error) {
-      console.error("Error handling MCP HTTP request", error);
-      this.sendJson(res, 500, { error: "Internal server error" });
+      this.handleRouteError("POST", error, res, req?.body?.id);
     }
   }
 
+  private async handleGet(req: Request, res: Response) {
+    console.error("Received MCP GET request");
+    try {
+      const sessionId = getSessionIdFromRequest(req);
+      if (!sessionId) {
+        this.sendJsonRpcError(res, 400, -32000, "Bad Request: No valid session ID provided", req?.body?.id);
+        return;
+      }
+      const session = this.sessions.get(sessionId);
+      if (!session) {
+        this.sendJsonRpcError(res, 400, -32000, "Bad Request: No valid session ID provided", req?.body?.id);
+        return;
+      }
+
+      const headerApiKey = extractApiKey(req);
+      const effectiveKey = headerApiKey ?? session.resolverContext.apiKey;
+      if (effectiveKey) {
+        this.attachAuth(req as AugmentedRequest, effectiveKey);
+        session.resolverContext.apiKey = effectiveKey;
+      }
+
+      const lastEventId = req.header("last-event-id");
+      if (lastEventId) {
+        console.error(`Client reconnecting with Last-Event-ID: ${lastEventId}`);
+      } else {
+        console.error(`Establishing new SSE stream for session ${sessionId}`);
+      }
+
+      await session.transport.handleRequest(req as AugmentedRequest, res);
+    } catch (error) {
+      this.handleRouteError("GET", error, res, req?.body?.id);
+    }
+  }
+
+  private async handleDelete(req: Request, res: Response) {
+    try {
+      const sessionId = getSessionIdFromRequest(req);
+      if (!sessionId) {
+        this.sendJsonRpcError(res, 400, -32000, "Bad Request: No valid session ID provided", req?.body?.id);
+        return;
+      }
+      console.error(`Received session termination request for session ${sessionId}`);
+      const session = this.sessions.get(sessionId);
+      if (!session) {
+        this.sendJsonRpcError(res, 400, -32000, "Bad Request: No valid session ID provided", req?.body?.id);
+        return;
+      }
+
+      const headerApiKey = extractApiKey(req);
+      const effectiveKey = headerApiKey ?? session.resolverContext.apiKey;
+      if (effectiveKey) {
+        this.attachAuth(req as AugmentedRequest, effectiveKey);
+        session.resolverContext.apiKey = effectiveKey;
+      }
+
+      await session.transport.handleRequest(req as AugmentedRequest, res);
+    } catch (error) {
+      this.handleRouteError("DELETE", error, res, req?.body?.id, "Error handling session termination");
+    }
+  }
+
+  private sendHealth(res: Response) {
+    res.status(200).json({ status: "ok", service: "solidityscan-mcp-server" });
+  }
+
+  private attachAuth(req: AugmentedRequest, apiKey: string) {
+    req.apiKey = apiKey;
+    req.auth = {
+      token: apiKey,
+      clientId: "http-client",
+      scopes: [],
+      extra: { apiKey },
+    };
+  }
+
+  private sendJsonRpcError(res: Response, status: number, code: number, message: string, id: unknown = null) {
+    res.status(status).json({
+      jsonrpc: "2.0",
+      error: {
+        code,
+        message,
+      },
+      id: id ?? null,
+    });
+  }
+
+  private handleRouteError(method: string, error: unknown, res: Response, id: unknown, fallbackMessage = "Internal server error") {
+    console.error(`Error handling MCP ${method} request:`, error);
+    if (!res.headersSent) {
+      this.sendJsonRpcError(res, 500, -32603, fallbackMessage, id);
+    }
+  }
+
+  private async teardownSession(sessionId: string) {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return;
+    }
+    console.error(`Transport closed for session ${sessionId}, removing from sessions map`);
+    this.sessions.delete(sessionId);
+    try {
+      await session.transport.close();
+    } catch (transportError) {
+      console.error(`Error closing transport for session ${sessionId}`, transportError);
+    }
+    try {
+      await session.cleanup();
+    } catch (cleanupError) {
+      console.error(`Error cleaning up session ${sessionId}`, cleanupError);
+    }
+  }
+
+  private async closeAllSessions() {
+    const closures = Array.from(this.sessions.keys()).map((sessionId) => this.teardownSession(sessionId));
+    await Promise.allSettled(closures);
+  }
+
   async start() {
+    if (this.httpServer) {
+      return this.port;
+    }
     await new Promise<void>((resolve) => {
-      this.httpServer.listen(this.port, this.host, () => {
-        const address = this.httpServer.address() as AddressInfo | string | null;
+      this.httpServer = this.app.listen(this.port, this.host, () => {
+        const address = this.httpServer?.address() as AddressInfo | string | null;
         if (address && typeof address !== "string") {
           this.port = address.port;
         }
@@ -171,31 +270,74 @@ export class SolidityScanMCPHTTPServer {
   }
 
   async stop() {
-    await new Promise<void>((resolve, reject) => {
-      this.httpServer.close((err) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-        resolve();
+    if (this.httpServer) {
+      await new Promise<void>((resolve, reject) => {
+        this.httpServer!.close((err) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          resolve();
+        });
       });
-    });
+      this.httpServer = undefined;
+    }
+    await this.closeAllSessions();
   }
 }
 
 const isDirectRun = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
 
 if (isDirectRun) {
+  console.error("Starting Streamable HTTP server...");
   const port = Number(process.env.PORT || process.env.SOLIDITYSCAN_MCP_PORT || 8080);
   const server = new SolidityScanMCPHTTPServer(port);
   server
     .start()
-    .then(() => {
-      console.error(`SolidityScan MCP HTTP server listening on port ${port}`);
+    .then((resolvedPort) => {
+      console.error(`MCP Streamable HTTP Server listening on port ${resolvedPort}`);
     })
     .catch((error) => {
       console.error("Failed to start SolidityScan MCP HTTP server", error);
       process.exitCode = 1;
     });
+
+  const handleShutdown = async () => {
+    console.error("Shutting down server...");
+    try {
+      await server.stop();
+      console.error("Server shutdown complete");
+      process.exit(0);
+    } catch (error) {
+      console.error("Error during shutdown", error);
+      process.exit(1);
+    }
+  };
+
+  process.on("SIGINT", handleShutdown);
+  process.on("SIGTERM", handleShutdown);
 }
 
+function extractApiKey(req: Request) {
+  const authHeader = req.header("authorization");
+  if (typeof authHeader === "string") {
+    const match = authHeader.match(/^Bearer\s+(.+)$/i);
+    if (match) {
+      return match[1];
+    }
+    return authHeader;
+  }
+  const apiKeyHeader = req.header("x-api-key");
+  if (typeof apiKeyHeader === "string") {
+    return apiKeyHeader;
+  }
+  const solidityScanHeader = req.header("x-solidityscan-api-key");
+  if (typeof solidityScanHeader === "string") {
+    return solidityScanHeader;
+  }
+  return undefined;
+}
+
+function getSessionIdFromRequest(req: Request) {
+  return req.header("mcp-session-id") ?? req.header("x-mcp-session-id") ?? undefined;
+}
