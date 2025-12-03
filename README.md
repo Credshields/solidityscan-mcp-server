@@ -49,11 +49,21 @@ API keys must be provided with each request. See the [API Key Handling](#api-key
 
 ## Using with an MCP client
 
-Connect to the server via HTTP endpoint. The server runs on port 8080 by default.
+The server now exposes **two transports**:
 
-**MCP Endpoint:** `http://your-server:8080/mcp`
+### 1. Streamable HTTP + SSE (default)
 
-API keys must be provided per-request via headers, query parameters, or tool arguments.
+- Endpoint: `http://your-server:8080/mcp`
+- Works with standard MCP HTTP clients.
+- Uses automatic SSE keep-alives to prevent idle disconnects, but Cloudflare (and many load balancers) still enforce a hard 100s timeout on HTTP responses. Long scans (>2 minutes) may still hit 524/504 errors through Cloudflare.
+
+### 2. WebSocket transport (recommended for long scans)
+
+- Endpoint: `ws://your-server:8080/ws` (or `wss://` when TLS is terminated in front)
+- Persistent full-duplex channel that avoids Cloudflare’s request time limits.
+- Use this endpoint in MCP clients that support WebSocket transports whenever scans might exceed ~60-90 seconds.
+
+API keys must be provided per-request via headers, query parameters, or tool arguments for both transports.
 
 ## Available tools
 
@@ -175,10 +185,11 @@ pnpm dev:http        # Run Streamable HTTP server with tsx
 pnpm start:http      # Run compiled HTTP/SSE server
 ```
 
-### Streamable HTTP + SSE transport
+### Streamable HTTP + SSE + WebSocket transport
 
-- `server-http.ts` hosts the MCP server over the Streamable HTTP transport, supporting both POST + SSE flows in a single endpoint.  
-- Each request may include `Authorization: Bearer <SOLIDITYSCAN API KEY>` or `X-API-Key`; the server caches the first key seen for the session and reuses it for subsequent requests/subscriptions.
+- `server-http.ts` hosts both the Streamable HTTP transport and the `/ws` WebSocket transport on the same process.  
+- Each request may include `Authorization: Bearer <SOLIDITYSCAN API KEY>` or `X-API-Key`; the server caches the first key seen for the session and reuses it for subsequent requests/subscriptions.  
+- SSE connections send periodic heartbeat comments so intermediaries see traffic, while WebSocket connections avoid strict request timeouts entirely.
 
 ## CI/CD Pipeline
 

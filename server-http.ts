@@ -2,7 +2,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { WebSocketServer, WebSocket, type RawData } from "ws";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { SolidityScanMCPServer } from "./server-core.js";
 
@@ -12,18 +15,82 @@ type AugmentedRequest = IncomingMessage & {
 };
 
 type SessionRecord = {
-  transport: StreamableHTTPServerTransport;
+  transport: StreamableHTTPServerTransport | WebSocketTransport;
   server: SolidityScanMCPServer;
   resolverContext: {
     apiKey?: string;
   };
 };
 
+class WebSocketTransport implements Transport {
+  private ws: WebSocket;
+  sessionId: string;
+  onclose?: () => void;
+  onerror?: (error: Error) => void;
+  onmessage?: <T extends JSONRPCMessage>(message: T, extra?: { requestInfo?: unknown; authInfo?: AuthInfo }) => void;
+  setProtocolVersion?: (version: string) => void;
+
+  constructor(ws: WebSocket, sessionId: string) {
+    this.ws = ws;
+    this.sessionId = sessionId;
+
+    this.ws.on("message", (data: RawData) => {
+      try {
+        const message = JSON.parse(data.toString()) as JSONRPCMessage;
+        this.onmessage?.(message, {
+          requestInfo: { headers: {} },
+          authInfo: (ws as unknown as { authInfo?: AuthInfo }).authInfo,
+        });
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        this.onerror?.(err);
+      }
+    });
+
+    this.ws.on("close", () => {
+      this.onclose?.();
+    });
+
+    this.ws.on("error", (error: Error) => {
+      this.onerror?.(error);
+    });
+  }
+
+  async start(): Promise<void> {
+    // No-op, WebSocket already connected
+  }
+
+  async send(message: JSONRPCMessage): Promise<void> {
+    if (this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message));
+      return;
+    }
+    throw new Error("WebSocket is not open");
+  }
+
+  async close(): Promise<void> {
+    if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+      this.ws.close();
+    }
+    this.onclose?.();
+  }
+}
+
 export class SolidityScanMCPHTTPServer {
   private sessions = new Map<string, SessionRecord>();
   private httpServer = createServer(this.handleRequest.bind(this));
+  private wss: WebSocketServer;
 
-  constructor(private port: number, private host = "0.0.0.0") {}
+  constructor(private port: number, private host = "0.0.0.0") {
+    this.wss = new WebSocketServer({
+      server: this.httpServer,
+      path: "/ws",
+    });
+
+    this.wss.on("connection", (ws, req) => {
+      this.handleWebSocketConnection(ws, req as AugmentedRequest);
+    });
+  }
 
   private extractApiKey(req: IncomingMessage, url?: URL): string | undefined {
     // Try Authorization header (Bearer token)
@@ -179,7 +246,15 @@ export class SolidityScanMCPHTTPServer {
         if (apiKey) {
           session.resolverContext.apiKey = apiKey;
         }
-        await session.transport.handleRequest(req, res);
+        if (session.transport instanceof StreamableHTTPServerTransport) {
+          await session.transport.handleRequest(req, res);
+        } else {
+          this.sendJson(res, 400, {
+            jsonrpc: "2.0",
+            error: { code: -32000, message: "Session is using WebSocket transport" },
+            id: null,
+          });
+        }
         return;
       }
 
@@ -239,6 +314,63 @@ export class SolidityScanMCPHTTPServer {
     }
   }
 
+  private async handleWebSocketConnection(ws: WebSocket, req: AugmentedRequest) {
+    const hostHeader = req.headers.host || `${this.host}:${this.port}`;
+    const parsedUrl = new URL(req.url || "/", `ws://${hostHeader}`);
+    const apiKey = this.extractApiKey(req, parsedUrl);
+
+    (ws as unknown as { authInfo?: AuthInfo }).authInfo = apiKey
+      ? {
+          token: apiKey,
+          clientId: "websocket-client",
+          scopes: [],
+          extra: { apiKey },
+        }
+      : undefined;
+
+    const newServer = new SolidityScanMCPServer();
+    const resolverContext: SessionRecord["resolverContext"] = { apiKey };
+
+    newServer.setApiKeyResolver((context) => {
+      if (resolverContext.apiKey) {
+        return resolverContext.apiKey;
+      }
+      const extraKey = context?.authInfo?.extra?.apiKey;
+      if (typeof extraKey === "string") {
+        return extraKey;
+      }
+      const token = context?.authInfo?.token;
+      if (typeof token === "string") {
+        return token;
+      }
+      return undefined;
+    });
+
+    const sessionId = randomUUID();
+    const transport = new WebSocketTransport(ws, sessionId);
+
+    transport.onclose = () => {
+      this.sessions.delete(sessionId);
+    };
+    transport.onerror = (error) => {
+      console.error(`WebSocket session ${sessionId} error:`, error);
+    };
+
+    try {
+      await newServer.getServer().connect(transport);
+      this.sessions.set(sessionId, {
+        transport,
+        server: newServer,
+        resolverContext,
+      });
+    } catch (error) {
+      console.error("Error handling WebSocket connection:", error);
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close(1011, "Internal server error");
+      }
+    }
+  }
+
   async start() {
     await new Promise<void>((resolve) => {
       this.httpServer.listen(this.port, this.host, () => {
@@ -262,6 +394,10 @@ export class SolidityScanMCPHTTPServer {
       }
     }
     this.sessions.clear();
+
+    await new Promise<void>((resolve) => {
+      this.wss.close(() => resolve());
+    });
 
     // Close HTTP server
     await new Promise<void>((resolve, reject) => {
@@ -305,6 +441,7 @@ if (isDirectRun) {
       console.error(`SolidityScan MCP HTTP server listening on ${host}:${actualPort}`);
       console.error(`Health check: http://${host}:${actualPort}/health`);
       console.error(`MCP endpoint: http://${host}:${actualPort}/mcp`);
+      console.error(`MCP WebSocket endpoint: ws://${host}:${actualPort}/ws`);
     })
     .catch((error) => {
       console.error("Failed to start SolidityScan MCP HTTP server", error);

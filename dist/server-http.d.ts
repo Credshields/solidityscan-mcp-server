@@ -8,9 +8,10 @@ export declare class SolidityScanMCPHTTPServer {
     private extractApiKey;
     private setCorsHeaders;
     private sendJson;
+    private startSseKeepAlive;
     private handleRequest;
-    private handleWebSocketConnection;
     private handleMcpRequest;
+    private handleWebSocketConnection;
     start(): Promise<number>;
     stop(): Promise<void>;
 }

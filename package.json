@@ -28,10 +28,12 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.23.0",
     "solidityscan": "0.2.3",
+    "ws": "^8.18.0",
     "zod": "^4.0.17"
   },
   "devDependencies": {
     "@types/node": "^24.2.1",
+    "@types/ws": "^8.5.12",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"
   },
