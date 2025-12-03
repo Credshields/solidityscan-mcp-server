@@ -95,6 +95,10 @@ export class SolidityScanMCPHTTPServer {
         cleanup();
         return;
       }
+      if (!res.headersSent) {
+        // StreamableHTTPTransport hasn't flushed headers yet; try again later.
+        return;
+      }
       try {
         res.write(`: keepalive ${new Date().toISOString()}\n\n`);
       } catch (error) {
@@ -116,9 +120,6 @@ export class SolidityScanMCPHTTPServer {
     res.on("close", cleanup);
     res.on("finish", cleanup);
     res.on("error", cleanup);
-
-    // Send an immediate heartbeat so proxies see traffic right away.
-    writeHeartbeat();
 
     return cleanup;
   }
