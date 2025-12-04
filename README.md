@@ -49,19 +49,19 @@ API keys must be provided with each request. See the [API Key Handling](#api-key
 
 ## Using with an MCP client
 
-The server now exposes **two transports**:
+The server exposes **two transports**:
 
 ### 1. Streamable HTTP + SSE (default)
 
 - Endpoint: `http://your-server:8080/mcp`
 - Works with standard MCP HTTP clients.
-- Uses automatic SSE keep-alives to prevent idle disconnects, but Cloudflare (and many load balancers) still enforce a hard 100s timeout on HTTP responses. Long scans (>2 minutes) may still hit 524/504 errors through Cloudflare.
+- Uses server‑sent events (SSE) with keep-alives to stream long-running tool responses over a single HTTP request.
+- Cloudflare (and many load balancers) still enforce a hard 100s timeout on HTTP responses, so for very long scans you should prefer WebSocket.
 
 ### 2. WebSocket transport (recommended for long scans)
 
 - Endpoint: `ws://your-server:8080/ws` (or `wss://` when TLS is terminated in front)
-- Persistent full-duplex channel that avoids Cloudflare’s request time limits.
-- Use this endpoint in MCP clients that support WebSocket transports whenever scans might exceed ~60-90 seconds.
+- Persistent full-duplex channel that avoids strict request time limits and is ideal for multi-minute scans.
 
 API keys must be provided per-request via headers, query parameters, or tool arguments for both transports.
 
@@ -75,21 +75,12 @@ API keys must be provided per-request via headers, query parameters, or tool arg
 | `scan_project` | Scan a Git repository project | `provider`, `projectUrl`, `projectName` |
 | `scan_local_directory` | Scan a local directory of Solidity files | `directoryPath` |
 | `scan_file_content` | Scan raw Solidity source content | `fileContent` |
-| `get_job_status` | Check the status or retrieve the result of a queued job | `jobId` |
 
 Notes:
 
 - Use `get_supported_platforms_chains` to discover valid `platform` names and their `chain` names/IDs.
 - Although some client UIs may not mark `platform` as required, this server requires it for chain resolution.
-- All long-running scans respond immediately with a `jobId`. Poll `get_job_status` to obtain progress updates or the final result.
-
-### Asynchronous job flow
-
-1. **Submit a scan tool** (`scan_contract`, `scan_project`, `scan_local_directory`, etc.). The server validates input, queues the work off-thread, and returns a `jobId` plus basic context.
-2. **Poll `get_job_status`.** While the job is queued or running you’ll get a status message and timestamps, keeping each HTTP call short enough for Cloudflare.
-3. **Retrieve the final output.** Once the job is `succeeded` or `failed`, `get_job_status` returns the original tool response (including any error details). Jobs remain available for roughly one hour.
-
-This pattern keeps HTTP/SSE requests well under Cloudflare’s ~100 s proxy timeout, even when SolidityScan itself needs several minutes to finish.
+- Long-running scans now execute as **single tool calls**. When used over HTTP, responses are streamed via SSE; when used over WebSocket, results are delivered over the persistent connection. No separate `jobId` or polling tool is required.
 
 ## Examples
 

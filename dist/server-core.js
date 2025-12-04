@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
@@ -58,77 +57,10 @@ const ScanAndGetReportPDFSchema = z.object({
     reportOptions: z.any().optional().describe("Optional report generation options expected by the SDK"),
     apiToken: z.string().min(1).describe("SolidityScan API token"),
 });
-const GetJobStatusSchema = z.object({
-    jobId: z.string().min(1).describe("Identifier returned by a previously queued job"),
-});
-class AsyncJobManager {
-    retentionMs;
-    jobs = new Map();
-    cleanupTimer;
-    constructor(retentionMs = 1000 * 60 * 60) {
-        this.retentionMs = retentionMs;
-        this.cleanupTimer = setInterval(() => this.cleanupExpiredJobs(), this.retentionMs);
-        this.cleanupTimer.unref?.();
-    }
-    enqueue(toolName, runner, context) {
-        const id = randomUUID();
-        const createdAt = new Date().toISOString();
-        const job = {
-            id,
-            toolName,
-            status: "queued",
-            createdAt,
-            context,
-        };
-        this.jobs.set(id, job);
-        setImmediate(async () => {
-            job.status = "running";
-            job.startedAt = new Date().toISOString();
-            try {
-                job.result = await runner();
-                job.status = "succeeded";
-            }
-            catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                job.error = message;
-                job.status = "failed";
-                job.result = {
-                    content: [
-                        {
-                            type: "text",
-                            text: `Job ${job.id} failed: ${message}`,
-                        },
-                    ],
-                    isError: true,
-                };
-            }
-            finally {
-                job.finishedAt = new Date().toISOString();
-            }
-        });
-        return job;
-    }
-    getJob(id) {
-        return this.jobs.get(id);
-    }
-    cleanupExpiredJobs() {
-        const cutoff = Date.now() - this.retentionMs;
-        for (const [id, job] of this.jobs.entries()) {
-            if (!job.finishedAt) {
-                continue;
-            }
-            const finishedTs = Date.parse(job.finishedAt);
-            if (Number.isFinite(finishedTs) && finishedTs < cutoff) {
-                this.jobs.delete(id);
-            }
-        }
-    }
-}
 export class SolidityScanMCPServer {
     server;
     platformChainCache;
     apiKeyResolver;
-    jobManager = new AsyncJobManager();
     constructor() {
         this.server = new Server({
             name: "solidityscan-mcp-server",
@@ -161,7 +93,7 @@ export class SolidityScanMCPServer {
                 tools: [
                     {
                         name: "scan_contract",
-                        description: "Queue an asynchronous scan of a deployed smart contract by address for security vulnerabilities. Returns a jobId; clients should automatically poll get_job_status until the job completes.",
+                        description: "Scan a deployed smart contract by address for security vulnerabilities. This is a potentially long-running call; when using HTTP, prefer SSE or WebSocket transports to avoid timeouts.",
                         inputSchema: {
                             type: "object",
                             properties: {
@@ -189,7 +121,7 @@ export class SolidityScanMCPServer {
                     },
                     {
                         name: "scan_and_get_report_pdf",
-                        description: "Queue an asynchronous quick scan and PDF report generation for a deployed contract. Returns a jobId; clients should automatically poll get_job_status until the job completes.",
+                        description: "Run a quick scan and generate a PDF report for a deployed contract. This is a potentially long-running call; when using HTTP, prefer SSE or WebSocket transports to avoid timeouts.",
                         inputSchema: {
                             type: "object",
                             properties: {
@@ -230,7 +162,7 @@ export class SolidityScanMCPServer {
                     },
                     {
                         name: "scan_project",
-                        description: "Queue an asynchronous scan of a Git repository project for security vulnerabilities. Returns a jobId; clients should automatically poll get_job_status until the job completes.",
+                        description: "Scan a Git repository project for security vulnerabilities. This is a potentially long-running call; when using HTTP, prefer SSE or WebSocket transports to avoid timeouts.",
                         inputSchema: {
                             type: "object",
                             properties: {
@@ -272,7 +204,7 @@ export class SolidityScanMCPServer {
                     },
                     {
                         name: "scan_local_directory",
-                        description: "Queue an asynchronous scan of a local directory containing Solidity files. Returns a jobId; clients should automatically poll get_job_status until the job completes.",
+                        description: "Scan a local directory containing Solidity files. This is a potentially long-running call; when using HTTP, prefer SSE or WebSocket transports to avoid timeouts.",
                         inputSchema: {
                             type: "object",
                             properties: {
@@ -295,7 +227,7 @@ export class SolidityScanMCPServer {
                     },
                     {
                         name: "scan_file_content",
-                        description: "Queue an asynchronous scan of raw Solidity source code content. Returns a jobId; clients should automatically poll get_job_status until the job completes.",
+                        description: "Scan raw Solidity source code content. This is a potentially long-running call; when using HTTP, prefer SSE or WebSocket transports to avoid timeouts.",
                         inputSchema: {
                             type: "object",
                             properties: {
@@ -319,20 +251,6 @@ export class SolidityScanMCPServer {
                                 },
                             },
                             required: ["fileContent"],
-                        },
-                    },
-                    {
-                        name: "get_job_status",
-                        description: "Check the status/result of a previously queued long-running scan",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                jobId: {
-                                    type: "string",
-                                    description: "Identifier returned when the job was queued",
-                                },
-                            },
-                            required: ["jobId"],
                         },
                     },
                 ],
@@ -362,8 +280,6 @@ export class SolidityScanMCPServer {
                         return await this.scanFileContent(args);
                     case "scan_and_get_report_pdf":
                         return await this.scanAndGetReportPDF(args);
-                    case "get_job_status":
-                        return await this.getJobStatus(args);
                     default:
                         throw new Error(`Unknown tool: ${name}`);
                 }
@@ -384,8 +300,7 @@ export class SolidityScanMCPServer {
     }
     async scanAndGetReportPDF(args) {
         const parsed = ScanAndGetReportPDFSchema.parse(args);
-        const job = this.jobManager.enqueue("scan_and_get_report_pdf", () => this.executeScanAndGetReportPDF(parsed), { contractAddress: parsed.contractAddress, platform: parsed.platform, chain: parsed.chain });
-        return this.buildJobQueuedResponse(job.id, `Scan with PDF generation queued for ${parsed.contractAddress}`);
+        return this.executeScanAndGetReportPDF(parsed);
     }
     async executeScanAndGetReportPDF(parsed) {
         const token = this.getApiToken(parsed.apiToken);
@@ -422,64 +337,6 @@ export class SolidityScanMCPServer {
             ],
         };
     }
-    buildJobQueuedResponse(jobId, summary) {
-        return {
-            content: [
-                {
-                    type: "text",
-                    text: `${summary}\n\n**Job ID:** ${jobId}\nUse the \`get_job_status\` tool with this jobId to check progress or retrieve the final result once it completes.`,
-                },
-            ],
-            metadata: {
-                jobId,
-                status: "queued",
-            },
-        };
-    }
-    formatJobMetadata(job) {
-        return {
-            jobId: job.id,
-            status: job.status,
-            toolName: job.toolName,
-            createdAt: job.createdAt,
-            startedAt: job.startedAt,
-            finishedAt: job.finishedAt,
-            context: job.context,
-        };
-    }
-    async getJobStatus(args) {
-        const { jobId } = GetJobStatusSchema.parse(args);
-        const job = this.jobManager.getJob(jobId);
-        if (!job) {
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Job not found: ${jobId}`,
-                    },
-                ],
-                isError: true,
-            };
-        }
-        if ((job.status === "succeeded" || job.status === "failed") && job.result) {
-            return {
-                ...job.result,
-                metadata: {
-                    ...(job.result.metadata ?? {}),
-                    ...this.formatJobMetadata(job),
-                },
-            };
-        }
-        return {
-            content: [
-                {
-                    type: "text",
-                    text: `Job ${job.id} is currently **${job.status}**. Last updated: ${job.startedAt ?? job.createdAt}.`,
-                },
-            ],
-            metadata: this.formatJobMetadata(job),
-        };
-    }
     getApiToken(providedToken) {
         if (!providedToken || providedToken.trim() === "") {
             throw new Error("No API token provided. Please provide the token via request arguments (apiToken), HTTP headers (Authorization, X-API-Key), or query parameters (token, apiKey).");
@@ -488,8 +345,7 @@ export class SolidityScanMCPServer {
     }
     async scanContract(args) {
         const parsed = ScanContractSchema.parse(args);
-        const job = this.jobManager.enqueue("scan_contract", () => this.executeScanContract(parsed), { contractAddress: parsed.contractAddress, platform: parsed.platform, chain: parsed.chain });
-        return this.buildJobQueuedResponse(job.id, `Contract scan queued for ${parsed.contractAddress}`);
+        return this.executeScanContract(parsed);
     }
     async executeScanContract(parsed) {
         const token = this.getApiToken(parsed.apiToken);
@@ -511,8 +367,7 @@ export class SolidityScanMCPServer {
     }
     async scanProject(args) {
         const parsed = ScanProjectSchema.parse(args);
-        const job = this.jobManager.enqueue("scan_project", () => this.executeProjectScan(parsed), { projectUrl: parsed.projectUrl, projectName: parsed.projectName });
-        return this.buildJobQueuedResponse(job.id, `Project scan queued for ${parsed.projectName}`);
+        return this.executeProjectScan(parsed);
     }
     async executeProjectScan(parsed) {
         const token = this.getApiToken(parsed.apiToken);
@@ -650,8 +505,7 @@ export class SolidityScanMCPServer {
     }
     async scanLocalDirectory(args) {
         const parsed = ScanLocalDirectorySchema.parse(args);
-        const job = this.jobManager.enqueue("scan_local_directory", () => this.executeLocalDirectoryScan(parsed), { directoryPath: parsed.directoryPath, projectName: parsed.projectName });
-        return this.buildJobQueuedResponse(job.id, `Local directory scan queued for ${parsed.directoryPath}`);
+        return this.executeLocalDirectoryScan(parsed);
     }
     async executeLocalDirectoryScan(parsed) {
         const token = this.getApiToken(parsed.apiToken);
@@ -673,8 +527,7 @@ export class SolidityScanMCPServer {
     }
     async scanFileContent(args) {
         const parsed = ScanFileContentSchema.parse(args);
-        const job = this.jobManager.enqueue("scan_file_content", () => this.executeFileContentScan(parsed), { fileName: parsed.fileName, projectName: parsed.projectName });
-        return this.buildJobQueuedResponse(job.id, `File content scan queued for ${parsed.fileName}`);
+        return this.executeFileContentScan(parsed);
     }
     async executeFileContentScan(parsed) {
         const token = this.getApiToken(parsed.apiToken);

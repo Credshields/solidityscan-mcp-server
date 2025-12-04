@@ -9,7 +9,6 @@ export declare class SolidityScanMCPServer {
     private server;
     private platformChainCache?;
     private apiKeyResolver?;
-    private jobManager;
     constructor();
     getServer(): Server<{
         method: string;
@@ -39,9 +38,6 @@ export declare class SolidityScanMCPServer {
     private setupToolHandlers;
     private scanAndGetReportPDF;
     private executeScanAndGetReportPDF;
-    private buildJobQueuedResponse;
-    private formatJobMetadata;
-    private getJobStatus;
     private getApiToken;
     private scanContract;
     private executeScanContract;

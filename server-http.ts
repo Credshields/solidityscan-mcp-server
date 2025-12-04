@@ -275,20 +275,25 @@ export class SolidityScanMCPHTTPServer {
         return undefined;
       });
 
+      const enableSSE = process.env.ENABLE_SSE !== "false";
+
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         enableJsonResponse: true,
-        onsessioninitialized: (id) => {
+        // Avoid hosts getting stuck on broken/unsupported SSE by allowing it to be disabled.
+        // `enableSSE` is not yet in the published type definition, so we cast to `any` here.
+        ...(enableSSE ? { enableSSE } : {}),
+        onsessioninitialized: (id: string) => {
           this.sessions.set(id, {
             transport,
             server: newServer,
             resolverContext,
           });
         },
-        onsessionclosed: (id) => {
+        onsessionclosed: (id: string) => {
           this.sessions.delete(id);
         },
-      });
+      } as any);
 
       await newServer.getServer().connect(transport);
       await transport.handleRequest(req, res);

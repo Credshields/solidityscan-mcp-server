@@ -228,9 +228,13 @@ export class SolidityScanMCPHTTPServer {
                 }
                 return undefined;
             });
+            const enableSSE = process.env.ENABLE_SSE !== "false";
             const transport = new StreamableHTTPServerTransport({
                 sessionIdGenerator: () => randomUUID(),
                 enableJsonResponse: true,
+                // Avoid hosts getting stuck on broken/unsupported SSE by allowing it to be disabled.
+                // `enableSSE` is not yet in the published type definition, so we cast to `any` here.
+                ...(enableSSE ? { enableSSE } : {}),
                 onsessioninitialized: (id) => {
                     this.sessions.set(id, {
                         transport,
