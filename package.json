@@ -21,7 +21,7 @@
     "cors": "^2.8.5",
     "express": "^5.2.1",
     "solidityscan": "0.2.3",
-    "zod": "^4.0.17"
+    "zod": "^4.1.12"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
