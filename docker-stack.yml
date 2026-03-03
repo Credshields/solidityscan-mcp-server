@@ -22,9 +22,9 @@ services:
         parallelism: 1
         delay: 5s
       restart_policy:
-        condition: always
+        condition: any
         delay: 5s
-        max_attempts: 3
+        max_attempts: 0
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://localhost:8080/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
       interval: 30s
