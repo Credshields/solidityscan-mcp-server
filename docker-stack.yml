@@ -2,6 +2,11 @@ version: '3.8'
 
 services:
   solidityscan-mcp:
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
     image: 132830644905.dkr.ecr.us-east-2.amazonaws.com/solidityscan-mcp-server:latest
     ports:
       - target: 8080
